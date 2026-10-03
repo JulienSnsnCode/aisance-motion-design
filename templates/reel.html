@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Reel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@800;900&family=JetBrains+Mono:wght@500;700&family=Source+Serif+4:opsz,wght@60,600&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { max-width: 100vw; max-height: 100vh; display: block; } /* aspect-ratio is set from w/h by the engine */
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script src="../scripts/engine.js"></script>
+<script>
+/* Reference reel: 6 bars @128 BPM = 11.25 s, 675 frames @60 fps.
+ * One scene = one bar. Every cut lands on a downbeat, every accent on a beat.
+ * Space play/pause · ←/→ frame · shift+←/→ beat · click to scrub. */
+const { ease, spring, range, stagger, lerp, clamp, blob, velocity, text, hash, mixColor, TAU } = Motion;
+
+const C = { ink: '#101012', signal: '#FA5030', cobalt: '#3147FC', sun: '#FAC73C', paper: '#F2EBE3', white: '#FFFFFF' };
+const F = { display: '"Montserrat", sans-serif', mono: '"JetBrains Mono", monospace', serif: '"Source Serif 4", serif' };
+const W = 1920, H = 1080, CX = W / 2, CY = H / 2;
+const WORDMARK = 'Claude';
+
+/* ---------- 1. DOT SPLIT — 1 → 2 → 4 → 8 on the beats, squash & stretch in flight ---------- */
+function dotSplit(ctx, p, lt, env) {
+  const b = env.beat;
+  // count doubles on each beat; radius of the formation grows with it
+  const pos = (i, t) => {
+    const stage = clamp(Math.floor(t / b), 0, 3);             // 0..3 -> 1,2,4,8 dots
+    const k = ease.outBack(range(t, stage * b, stage * b + b * 0.55), 2.2);
+    const n1 = 1 << stage, n0 = stage ? n1 >> 1 : 1;
+    const r0 = [0, 40, 70, 95][Math.max(0, stage - 1)] * (stage ? 1 : 0), r1 = [0, 40, 70, 95][stage];
+    const parent = i % n0, a0 = (parent / n0) * TAU + stage * 0.6 - 0.6, a1 = (i / n1) * TAU + stage * 0.6;
+    // exit: everything collapses to centre in the last eighth of the bar
+    const out = ease.inExpo(range(t, b * 3.55, b * 4));
+    const r = lerp(lerp(r0, r1, k), 0, out), a = lerp(a0, a1, k) + t * 0.8;
+    return [CX + Math.cos(a) * r, CY + Math.sin(a) * r];
+  };
+  const stage = clamp(Math.floor(lt / b), 0, 3), n = 1 << stage;
+  const pop = spring(lt, 3, 0.35);                           // first dot pops in on beat 1
+  // guide circle + crosshair: the "designer tool" layer, barely visible
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1.5;
+  if (stage === 3) { ctx.beginPath(); ctx.arc(CX, CY, 95 * ease.outCubic(range(lt, b * 3, b * 3.5)), 0, TAU); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(CX - 8, CY); ctx.lineTo(CX + 8, CY); ctx.moveTo(CX, CY - 8); ctx.lineTo(CX, CY + 8); ctx.stroke();
+  for (let i = 0; i < n; i++) {
+    const [x, y] = pos(i, lt), [vx, vy] = velocity((t) => pos(i, t), lt);
+    blob(ctx, x, y, 17 * pop, vx, vy, C.signal, 0.004);
+  }
+}
+
+/* ---------- 2. KINETIC TYPE SLAM — one word per beat, spring overshoot, bracket snap ---------- */
+function typeSlam(ctx, p, lt, env) {
+  const b = env.beat, font = `900 210px ${F.display}`;
+  ctx.font = font;
+  const words = [
+    { s: 'EVERY', beat: 0, from: [-900, 0] },
+    { s: 'FRAME', beat: 1, from: [0, -500], bracket: true },
+    { s: 'ON', beat: 2, from: [-700, 0] },
+    { s: 'PURPOSE', beat: 2.5, from: [900, 0] },
+  ];
+  // layout: line 1 = EVERY FRAME, line 2 = ON PURPOSE; the block re-centres as words arrive
+  const wEvery = ctx.measureText('EVERY ').width, wFrame = ctx.measureText('FRAME').width;
+  const wOn = ctx.measureText('ON ').width;
+  const line1 = wEvery + wFrame, settle = ease.inOutCubic(range(lt, b * 0.9, b * 1.4));
+  const x0 = lerp(CX - wEvery / 2 + 30, CX - line1 / 2, settle);
+  const lines = ease.inOutCubic(range(lt, b * 1.9, b * 2.3));
+  const y1 = lerp(CY + 75, CY - 25, lines), y2 = CY + 175;
+  const home = { EVERY: [x0, y1], FRAME: [x0 + wEvery, y1], ON: [x0, y2], PURPOSE: [x0 + wOn, y2] };
+  for (const w of words) {
+    const e = lt - w.beat * b;
+    if (e < 0) continue;
+    const k = spring(e, 2.4, 0.42);                          // overshoots past home, settles
+    const [hx, hy] = home[w.s];
+    const x = hx + w.from[0] * (1 - k), y = hy + w.from[1] * (1 - k);
+    const tilt = (1 - k) * (w.from[1] ? 0.25 : -0.12);       // slight rotation while in flight
+    ctx.save(); ctx.translate(x, y); ctx.rotate(tilt);
+    text(ctx, w.s, 0, 0, { font, color: C.ink });
+    ctx.restore();
+    if (w.bracket) {                                         // corner brackets snap in slightly after the word
+      const kb = spring(e - 0.08, 3, 0.5), pad = 18 + 40 * (1 - kb);
+      const bx = hx - pad, by = hy - 165 - pad, bw = wFrame + pad * 2, bh = 178 + pad * 2, L = 34;
+      ctx.strokeStyle = C.ink; ctx.lineWidth = 7; ctx.globalAlpha = clamp(kb * 2);
+      [[bx, by, 1, 1], [bx + bw, by, -1, 1], [bx, by + bh, 1, -1], [bx + bw, by + bh, -1, -1]].forEach(([cx, cy, sx, sy]) => {
+        ctx.beginPath(); ctx.moveTo(cx, cy + sy * L); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * L, cy); ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+    }
+  }
+  // transition out: iris — a black disc grows from centre on beat 4 and IS the next scene's background
+  const iris = ease.inExpo(range(lt, b * 3.3, b * 4));
+  if (iris > 0) {
+    ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(CX, CY, iris * 1150, 0, TAU); ctx.fill();
+    ctx.fillStyle = C.signal; ctx.beginPath(); ctx.arc(CX, CY, 22 * iris, 0, TAU); ctx.fill(); // the motif dot rides the iris
+  }
+}
+
+/* ---------- 3. SHAPE MORPH — polar radius functions, tool UI, echo trails ---------- */
+const shapes = [
+  { name: 'CIRCLE', color: C.signal, r: () => 1 },
+  { name: 'SQUARE', color: C.cobalt, r: (a) => 0.92 / Math.pow(Math.pow(Math.abs(Math.cos(a)), 5) + Math.pow(Math.abs(Math.sin(a)), 5), 1 / 5) },
+  { name: 'TRIANGLE', color: C.sun, r: (a) => 0.62 / Math.pow(Math.cos(((a % (TAU / 3)) + TAU / 3) % (TAU / 3) - Math.PI / 3) ** 6 + 0.0001, 1 / 6) },
+  { name: 'FLOWER', color: C.signal, r: (a) => 0.9 + 0.16 * Math.cos(5 * a) },
+];
+function shapeState(lt, b) {
+  const idx = clamp(Math.floor(lt / b), 0, 3), k = ease.inOutExpo(range(lt, idx * b - b * 0.45, idx * b));
+  const from = shapes[Math.max(0, idx - 1)], to = shapes[idx];
+  // hold still for half a beat, then whip 80° into the next beat (morph happens during the whip)
+  const rot = (Math.floor(lt / b) + ease.inOutExpo(range(lt % b, b * 0.55, b))) * 80;
+  return { from, to, k: idx === 0 ? 1 : k, rot: rot * Math.PI / 180, idx };
+}
+function morph(ctx, p, lt, env) {
+  const b = env.beat, R = 170;
+  const draw = (t, alpha, strokeOnly) => {
+    const s = shapeState(t, b);
+    ctx.save(); ctx.translate(CX, CY); ctx.rotate(s.rot);
+    ctx.beginPath();
+    for (let i = 0; i <= 180; i++) {
+      const a = (i / 180) * TAU, r = R * lerp(s.from.r(a), s.to.r(a), s.k);
+      i ? ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    ctx.closePath();
+    ctx.globalAlpha = alpha;
+    if (strokeOnly) { ctx.strokeStyle = s.to.color; ctx.lineWidth = 1.5; ctx.stroke(); }
+    else { ctx.fillStyle = mixColor(s.from.color, s.to.color, s.k); ctx.fill(); }
+    ctx.restore();
+    return s;
+  };
+  // echoes: the same shape sampled a few frames in the past, outline only
+  for (let e = 4; e >= 1; e--) draw(lt - e * 0.035, 0.18, true);
+  const s = draw(lt, 1, false);
+  // tool layer: bounding box with handles + live readout
+  ctx.save(); ctx.translate(CX, CY); ctx.rotate(s.rot);
+  const B = R + 40;
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5; ctx.strokeRect(-B, -B, B * 2, B * 2);
+  for (const [hx, hy] of [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]]) {
+    ctx.fillStyle = C.ink; ctx.fillRect(hx * B - 5, hy * B - 5, 10, 10); ctx.strokeRect(hx * B - 5, hy * B - 5, 10, 10);
+  }
+  ctx.restore();
+  const deg = ((s.rot * 180 / Math.PI) % 360).toFixed(1).padStart(5, '0');
+  text(ctx, `ROT ${deg}°`, CX + B + 70, CY - B + 10, { font: `700 15px ${F.mono}`, color: C.white, tracking: 2 });
+  text(ctx, `SHAPE ${s.to.name}`, CX + B + 70, CY - B + 32, { font: `500 15px ${F.mono}`, color: 'rgba(255,255,255,0.55)', tracking: 2 });
+}
+
+/* ---------- 4. RIPPLE GRID — one rule applied to 1,000 dots ---------- */
+function ripple(ctx, p, lt, env) {
+  const gap = 48, cols = Math.ceil(W / gap) + 1, rows = Math.ceil(H / gap) + 1;
+  const fronts = [0, 1, 2, 3].map((i) => (lt - i * env.beat) * 900);     // a new ring on every beat
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
+    const x0 = i * gap + (W % gap) / 2, y0 = j * gap + (H % gap) / 2;
+    const dx = x0 - CX, dy = y0 - CY, d = Math.hypot(dx, dy);
+    let hit = 0;
+    for (const f of fronts) if (f > 0) hit = Math.max(hit, Math.exp(-(((d - f) / 70) ** 2)));
+    const appear = ease.outBack(range(lt, d / 2600, d / 2600 + 0.25));  // dots pop in from the centre outwards
+    const push = 14 * hit, x = x0 + (dx / (d || 1)) * push, y = y0 + (dy / (d || 1)) * push;
+    ctx.fillStyle = mixColor(C.ink, C.signal, clamp(hit * 1.6));
+    ctx.beginPath(); ctx.arc(x, y, (2.6 + 6 * hit) * appear, 0, TAU); ctx.fill();
+  }
+}
+
+/* ---------- 5. MARQUEE → RINGS — straight rows bend into concentric circles ---------- */
+const rowsTxt = [
+  { s: 'MOTION DESIGN • ANIMATION • ART DIRECTION • ', size: 40, weight: 800, stroke: 0, track: 10, dir: -1, ring: 400 },
+  { s: 'TYPOGRAPHY • 3D • ILLUSTRATION • ', size: 32, weight: 800, stroke: 1.4, track: 2, dir: 1, ring: 320 },
+  { s: 'RHYTHM • TIMING • EASING • ', size: 30, weight: 800, stroke: 0, track: 2, dir: -1, ring: 245 },
+  { s: 'LINE • COLOR • SHAPE • ', size: 24, weight: 800, stroke: 1.2, track: 2, dir: 1, ring: 175 },
+];
+function rings(ctx, p, lt, env) {
+  const b = env.beat;
+  const k = ease.inOutExpo(range(lt, b * 1, b * 2.4));          // 0 = straight rows, 1 = rings
+  const enter = (i) => ease.outExpo(stagger(lt, 0, b * 0.8, i, 4, 0.6));
+  const exit = ease.inExpo(range(lt, b * 3.4, b * 4));
+  rowsTxt.forEach((row, i) => {
+    const font = `${row.weight} ${row.size}px ${F.display}`;
+    ctx.font = font;
+    const straightY = CY - 150 + i * 70;
+    const R = row.ring * Math.pow(6000 / row.ring, 1 - k);       // radius interpolated in log space = smooth bend
+    const top = lerp(straightY, CY - row.ring, k), cy = top + R;
+    const scroll = row.dir * (lt * 260 + (1 - enter(i)) * 1600); // enter fast from the side, then cruise
+    const spin = row.dir * k * lt * 0.35;
+    let a = -Math.PI / 2 - (W * 0.75) / R + scroll / R + spin, n = 0;
+    const end = a + Math.min(TAU, (W * 1.6) / R);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    while (a < end && n < 600) {
+      const ch = row.s[n % row.s.length], w = ctx.measureText(ch).width + row.track, da = w / R;
+      const r = R * (1 - exit * (0.6 + i * 0.1));                // collapse inward on exit
+      ctx.save();
+      ctx.translate(CX + Math.cos(a + da / 2) * r, cy + Math.sin(a + da / 2) * r - (cy - CY) * exit);
+      ctx.rotate(a + da / 2 + Math.PI / 2);
+      ctx.globalAlpha = 1 - exit;
+      const accent = ch === '•';
+      if (row.stroke && !accent) { ctx.lineWidth = row.stroke; ctx.strokeStyle = C.white; ctx.strokeText(ch, 0, 0); }
+      else { ctx.fillStyle = accent ? C.signal : C.white; ctx.fillText(ch, 0, 0); }
+      ctx.restore();
+      a += da; n++;
+    }
+  });
+  // the motif dot grows in the centre once the rings close
+  const dot = spring(lt - b * 2.2, 2.5, 0.4) * (1 - exit) + exit * 0;
+  ctx.fillStyle = C.signal; ctx.beginPath(); ctx.arc(CX, CY, Math.max(0, 26 * dot), 0, TAU); ctx.fill();
+}
+
+/* ---------- 6. END CARD — letters rise in stagger, the dot lands as the full stop ---------- */
+function endCard(ctx, p, lt, env) {
+  const b = env.beat, font = `600 190px ${F.serif}`;
+  ctx.font = font;
+  const total = ctx.measureText(WORDMARK).width, x0 = CX - total / 2 - 20, base = CY + 40;
+  let x = x0;
+  [...WORDMARK].forEach((ch, i) => {
+    const w = ctx.measureText(ch).width;
+    const k = ease.outExpo(stagger(lt, 0, b * 1.4, i, WORDMARK.length, 0.45));
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x - 10, base - 220, w + 20, 260); ctx.clip();   // baseline mask: letters rise from nothing
+    text(ctx, ch, x, base + (1 - k) * 200, { font, color: C.ink });
+    ctx.restore();
+    x += w;
+  });
+  // the dot: flies in on an arc from the upper right, squashes on landing, settles with a spring
+  const land = [x + 26, base - 14], t0 = b * 0.6, t1 = b * 1.6;
+  const path = (t) => { const q = ease.inOutCubic(range(t, t0, t1)); return [lerp(CX + 700, land[0], q), lerp(CY - 380, land[1], q) - Math.sin(q * Math.PI) * 220]; };
+  if (lt > t0) {
+    const [px, py] = path(lt), [vx, vy] = velocity(path, lt);
+    const settle = lt > t1 ? spring(lt - t1, 3, 0.3) : 1;
+    blob(ctx, px, py, 20 * (lt > t1 ? lerp(1.35, 1, settle) : 1), vx, vy, C.signal, 0.0025);
+  }
+  // subtitle tracks open; metadata line types on
+  const sub = ease.outCubic(range(lt, b * 1.6, b * 2.4));
+  ctx.globalAlpha = sub;
+  text(ctx, 'MOTION DESIGNER', CX, base + 80, { font: `700 22px ${F.mono}`, color: C.ink, align: 'center', tracking: lerp(2, 9, sub) });
+  const meta = '675 FRAMES · 60 FPS · 128 BPM · WRITTEN ENTIRELY IN CODE';
+  const chars = Math.floor(meta.length * range(lt, b * 2, b * 2.9));   // done a full beat before the end: final pose
+  // typed text is anchored to the FULL string's left edge, otherwise it shifts each frame and the motion blur doubles it
+  ctx.font = `500 15px ${F.mono}`;
+  const metaX = CX - (ctx.measureText(meta).width + 3 * meta.length) / 2;
+  ctx.globalAlpha = 0.5;
+  text(ctx, meta.slice(0, chars), metaX, base + 125, { font: `500 15px ${F.mono}`, color: C.ink, tracking: 3 });
+  ctx.globalAlpha = 1;
+}
+
+Motion.run({
+  bpm: 128, bars: 6, title: ['CLAUDE', 'MOTION REEL 2026'], monoFont: F.mono,
+  fonts: [`900 100px ${F.display}`, `500 15px ${F.mono}`, `700 15px ${F.mono}`, `600 100px ${F.serif}`],
+  scenes: [
+    { bar: 0, bg: C.ink,    hudInk: C.white, draw: dotSplit },
+    { bar: 1, bg: C.signal, hudInk: C.ink,   motionBlur: 14, draw: typeSlam },
+    { bar: 2, bg: C.ink,    hudInk: C.white, draw: morph },
+    { bar: 3, bg: C.paper,  hudInk: C.ink,   draw: ripple },
+    { bar: 4, bg: C.ink,    hudInk: C.white, draw: rings },
+    { bar: 5, bg: C.paper,  hudInk: C.ink,   hud: 'corners', draw: endCard },
+  ],
+});
+</script>
+</body>
+</html>

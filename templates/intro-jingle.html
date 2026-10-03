@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channel Intro</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@500;700&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { max-width: 100vw; max-height: 100vh; display: block; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script src="../scripts/engine.js"></script>
+<script>
+/* Channel intro jingle. 5 bars @128 BPM = 9.4 s, 1920x1080, 60 fps. Edit BRAND below, then render.
+ * Motif: the accent dot = the full stop of the slogan and of the name.
+ *
+ * BPM 128 · 5 bars · beat 0.469 s
+ * | 1 ink   | dot pops (1) and hops on 2-3-4; each landing punctuates the word it lands after: word 1 · word 2 · line 2. | the final dot inflates into an accent iris |
+ * | 2 accent| one topic slams per beat (BRAND.topics), outline echoes scroll, ink dot as bullet | ink slats rise from the bottom |
+ * | 3 ink   | tilted wall of thumbnails (assets/thumb-0..11.jpg, coloured cards if missing), rows step one card per beat | paper sweep with an accent edge |
+ * | 4-5 paper | avatar pops (1), name rises, accent dot lands as the full stop (2) = sonic logo, tagline opens; hold to the end | end |
+ *
+ * Optional assets next to this file: assets/avatar.jpg (initials on a disc if missing), assets/thumb-0.jpg … thumb-11.jpg.
+ */
+const BRAND = {
+  name: 'YOUR NAME',
+  initials: 'YN',                         // shown on the disc when assets/avatar.jpg is missing
+  handle: '@yourchannel',
+  tagline: 'TUTORIALS & TOOLS',
+  slogan: [['BUILD', 'FASTER'], 'SHIP IT'], // line 1 = two words (beats 1 and 2), line 2 = the punchline (beat 3, accent colour)
+  topics: ['AUTOMATION', 'AI AGENTS', 'NO-CODE', 'TUTORIALS'], // one per beat in bar 2
+  accent: '#FA5F81',
+};
+
+const { ease, spring, range, stagger, lerp, clamp, blob, velocity, text, TAU, cover, avatar } = Motion;
+
+const C = { ink: '#0C0C0E', pink: BRAND.accent, white: '#FFFFFF', paper: '#F2EEE9' };
+const F = { display: '"Bebas Neue", sans-serif', mono: '"JetBrains Mono", monospace' };
+const W = 1920, H = 1080, CX = W / 2, CY = H / 2;
+
+const images = { avatar: 'assets/avatar.jpg' };
+for (let i = 0; i < 12; i++) images['t' + i] = `assets/thumb-${i}.jpg`;
+
+// a dot that hops between landing spots: parabola into each beat, squash on landing, springs back to round
+function hopper(ctx, lt, b, spots, r, color, { hop = 0.6, height = 220 } = {}) {
+  let i = 0; while (i + 1 < spots.length && lt >= spots[i + 1].beat * b - hop * b) i++;
+  const s = spots[i], prev = spots[Math.max(0, i - 1)];
+  const path = (t) => {
+    const q = range(t, s.beat * b - hop * b, s.beat * b);
+    if (i === 0 || q >= 1) return [s.x, s.y];
+    const u = ease.inOutCubic(q);
+    return [lerp(prev.x, s.x, u), lerp(prev.y, s.y, u) - Math.sin(Math.PI * q) * height];
+  };
+  const [x, y] = path(lt), e = lt - s.beat * b;
+  if (e < 0 && i === 0) return null;
+  const grow = i === 0 ? spring(e, 2.6, 0.4) : 1;
+  const sq = e > 0 && i > 0 ? Math.max(0, 1 - spring(e, 3.2, 0.3)) : 0;
+  ctx.save(); ctx.translate(x, y + r * sq * 0.5); ctx.scale(1 + sq * 0.6, 1 - sq * 0.45);
+  if (e > 0) blob(ctx, 0, 0, r * grow, 0, 0, color, 0);
+  else { const [vx, vy] = velocity(path, lt); blob(ctx, 0, 0, r, vx, vy, color, 0.0014); }
+  ctx.restore();
+  return [x, y];
+}
+// word rising out of a mask at its baseline
+function rise(ctx, str, x, base, k, font, size, color) {
+  ctx.save(); ctx.beginPath(); ctx.rect(x - 20, base - size, 4000, size * 1.08); ctx.clip();
+  text(ctx, str, x, base + (1 - k) * size, { font, color });
+  ctx.restore();
+}
+
+/* ---------- 1. SLOGAN — word · word · punchline. ---------- */
+function slogan(ctx, p, lt, env) {
+  const b = env.beat, size = 250, font = `${size}px ${F.display}`, r = 30;
+  ctx.font = font;
+  const w = (s) => ctx.measureText(s).width, sp = w(' ');
+  const [[w1, w2], l2] = BRAND.slogan, l1 = `${w1} ${w2}`;
+  const x1 = CX - w(l1) / 2, x2 = CX - (w(l2) + 40 + 2 * r) / 2 - 20;
+  const y1 = CY - 30, y2 = CY + 230;
+  const words = [
+    { s: w1, x: x1, y: y1, beat: 0, color: C.white },
+    { s: w2, x: x1 + w(w1) + sp, y: y1, beat: 1, color: C.white },
+    { s: l2, x: x2, y: y2, beat: 2, color: C.pink },
+  ];
+  for (const wd of words) {
+    const k = ease.outExpo(range(lt, wd.beat * b - b * 0.12, wd.beat * b + b * 0.5));
+    if (k > 0) rise(ctx, wd.s, wd.x, wd.y, k, font, size, wd.color);
+  }
+  // the dot lands after each word: gap after word 1, end of line 1, full stop of line 2, then bounces in place on beat 4
+  const spots = [
+    { x: x1 + w(w1) + sp / 2, y: y1 - r, beat: 0 },
+    { x: x1 + w(l1) + 26 + r, y: y1 - r, beat: 1 },
+    { x: x2 + w(l2) + 20 + r, y: y2 - r, beat: 2 },
+    { x: x2 + w(l2) + 20 + r, y: y2 - r, beat: 3 },     // beat 4: a bounce in place, the full stop hits
+  ];
+  const pos = hopper(ctx, lt, b, spots, r, C.pink, { hop: 0.55, height: 180 });
+  // impact ticks on the full stop
+  const ie = lt - 3 * b;
+  if (ie > 0 && ie < 0.25) {
+    const k = ease.outCubic(ie / 0.25), [lx, ly] = [spots[3].x, spots[3].y];
+    ctx.save(); ctx.strokeStyle = C.pink; ctx.lineWidth = 6; ctx.globalAlpha = 1 - k;
+    for (let i = 0; i < 5; i++) { const a = Math.PI + (i / 4) * Math.PI; ctx.beginPath(); ctx.moveTo(lx + Math.cos(a) * (55 + 30 * k), ly + r + Math.sin(a) * (55 + 30 * k)); ctx.lineTo(lx + Math.cos(a) * (85 + 50 * k), ly + r + Math.sin(a) * (85 + 50 * k)); ctx.stroke(); }
+    ctx.restore();
+  }
+  // the full stop inflates into the pink of the next scene
+  const iris = ease.inExpo(range(lt, b * 3.35, b * 4));
+  if (iris > 0) { ctx.fillStyle = C.pink; ctx.beginPath(); ctx.arc(spots[3].x, spots[3].y, r + iris * 2400, 0, TAU); ctx.fill(); }
+}
+
+/* ---------- 2. TOPICS — one slam per beat ---------- */
+const TOPICS = BRAND.topics;
+function topics(ctx, p, lt, env) {
+  const b = env.beat, i = Math.min(3, Math.floor(lt / b)), e = lt - i * b, word = TOPICS[i];
+  // fit the word to ~74 % of the width
+  ctx.font = `100px ${F.display}`;
+  const size = Math.min(420, (W * 0.74 / ctx.measureText(word).width) * 100), font = `${size}px ${F.display}`;
+  ctx.font = font; const ww = ctx.measureText(word).width;
+  // outline echoes: rows of the same word scrolling in opposite directions (dense layer)
+  ctx.save(); ctx.globalAlpha = 0.22; ctx.lineWidth = 2; ctx.strokeStyle = C.ink; ctx.font = font; ctx.textBaseline = 'alphabetic';
+  for (const [dy, dir] of [[-size * 0.92, 1], [size * 0.92, -1]]) {
+    const shift = dir * (lt * 380 + e * 300);
+    for (let k = -3; k < 4; k++) ctx.strokeText(word, CX - ww / 2 + k * (ww + 80) + (shift % (ww + 80)), CY + size * 0.35 + dy);
+  }
+  ctx.restore();
+  // the slam: spring from big + slight tilt
+  const k = spring(e, 3, 0.42);
+  ctx.save(); ctx.translate(CX + 50, CY); ctx.scale(lerp(1.25, 1, k), lerp(1.25, 1, k)); ctx.rotate((1 - k) * (i % 2 ? 0.08 : -0.08));
+  text(ctx, word, -ww / 2, size * 0.35, { font, color: C.ink });
+  // ink dot as the bullet, squashed on each beat
+  const sq = Math.max(0, 1 - spring(e, 3.2, 0.3));
+  ctx.save(); ctx.translate(-ww / 2 - 70, size * 0.35 - size * 0.36); ctx.scale(1 + sq * 0.5, 1 - sq * 0.4);
+  blob(ctx, 0, 0, Math.max(22, size * 0.09), 0, 0, C.ink, 0); ctx.restore();
+  ctx.restore();
+  // exit: ink slats rise from the bottom, centre first
+  const n = 6;
+  for (let s = 0; s < n; s++) {
+    const order = Math.abs(s - (n - 1) / 2);
+    const q = ease.inExpo(range(lt, b * 3.3 + order * b * 0.05, b * 3.85 + order * b * 0.05));
+    if (q > 0) { ctx.fillStyle = C.ink; ctx.fillRect(s * W / n - 1, H * (1 - q), W / n + 2, H * q + 2); }
+  }
+}
+
+/* ---------- 3. THUMBNAIL WALL ---------- */
+function wall(ctx, p, lt, env) {
+  const b = env.beat, tw = 520, th = 292, gap = 28;
+  ctx.save();
+  ctx.translate(CX, CY); ctx.rotate(-0.12); ctx.scale(1.08, 1.08); ctx.translate(-CX, -CY);
+  for (let r = 0; r < 4; r++) {
+    const dir = r % 2 ? 1 : -1;
+    const enter = ease.outExpo(stagger(lt, 0, b * 0.8, r, 4, 0.55));
+    let steps = 0;
+    for (let s = 1; s < 4; s++) steps += ease.inOutExpo(range(lt, s * b - b * 0.32, s * b));
+    const shift = dir * (steps * (tw + gap) + (1 - enter) * 2200);
+    const y = CY - 2 * (th + gap) + r * (th + gap) + gap / 2 - 30;
+    for (let i = -3; i < 8; i++) {
+      const idx = ((i + r * 3) % 12 + 12) % 12;
+      const x = i * (tw + gap) + shift - (r % 2 ? 300 : 0);
+      if (x < -tw - 200 || x > W + 400) continue;
+      const im = env.img['t' + idx];
+      if (im) cover(ctx, im, x, y, tw, th, { radius: 16 });
+      else { Motion.roundRect(ctx, x, y, tw, th, 16); ctx.fillStyle = idx % 3 ? (idx % 3 === 1 ? '#2A2A30' : '#1C1C21') : C.pink; ctx.fill(); }
+    }
+  }
+  ctx.restore();
+  const sweep = ease.inExpo(range(lt, b * 3.4, b * 4));
+  if (sweep > 0) { ctx.fillStyle = C.paper; ctx.fillRect(0, 0, W * sweep, H); ctx.fillStyle = C.pink; ctx.fillRect(W * sweep - 24, 0, 24, H); }
+}
+
+/* ---------- 4. LOCKUP — avatar, name, the dot lands as the full stop ---------- */
+function lockup(ctx, p, lt, env) {
+  const b = env.beat, size = 210, font = `${size}px ${F.display}`, name = BRAND.name.toUpperCase(), R = 125, r = 24, track = 4;
+  ctx.font = font;
+  const nameW = [...name].reduce((s, ch) => s + ctx.measureText(ch).width + track, 0);
+  const groupW = 2 * R + 60 + nameW + 24 + 2 * r;
+  const gx = CX - groupW / 2, acx = gx + R, base = CY + size * 0.33, nx = gx + 2 * R + 60;
+  // avatar pops on beat 1
+  const av = spring(lt, 2.4, 0.45);
+  avatar(ctx, env.img.avatar, acx, CY - 10, R * av, { ring: 8 * av, ringColor: C.pink, initials: BRAND.initials, fill: C.ink, font: F.display });
+  // name rises letter by letter, left to right
+  let x = nx;
+  [...name].forEach((ch, i) => {
+    const cw = ctx.measureText(ch).width + track;
+    const k = ease.outExpo(stagger(lt, b * 0.15, b * 1.0, i, name.length, 0.45));
+    ctx.save(); ctx.beginPath(); ctx.rect(x - 6, base - size, cw + 12, size * 1.08); ctx.clip();
+    text(ctx, ch, x, base + (1 - k) * size, { font, color: C.ink });
+    ctx.restore(); x += cw;
+  });
+  // the motif resolves: the pink dot drops in as the full stop on beat 2
+  const dx = nx + nameW + 14 + r, dy = base - r;
+  hopper(ctx, lt, b, [{ x: dx, y: dy - 700, beat: 0.4 }, { x: dx, y: dy, beat: 1 }], r, C.pink, { hop: 0.45, height: 0 });
+  // tagline opens on its tracking
+  const tg = ease.outExpo(range(lt, b * 1.4, b * 2.4));
+  if (tg > 0) {
+    ctx.save(); ctx.globalAlpha = clamp(tg * 2) * 0.75;
+    text(ctx, `${BRAND.tagline}  ·  ${BRAND.handle.toUpperCase()}`, nx + 6, base + 70, { font: `700 30px ${F.mono}`, color: C.ink, tracking: lerp(0, 6, tg) });
+    ctx.restore();
+  }
+}
+
+// melody notes (absolute beats, MIDI) — on the same beats as the visual hits
+const lead = [
+  [0, 69, 0.5], [1, 72, 0.5], [2, 76, 0.5], [3, 79, 0.8],                    // bar 1: one note per landing
+  [4, 76, 0.4, 0.7], [5, 79, 0.4, 0.7], [6, 76, 0.4, 0.7], [7, 74, 0.6, 0.7], // bar 2: one per topic
+  [9, 71, 0.4, 0.5], [10, 74, 0.4, 0.5], [11, 79, 0.6, 0.6],                 // bar 3: card steps
+  [12, 76, 0.5, 1.1], [12.5, 79, 0.5, 1.1], [13, 81, 3, 1.3], [13, 69, 3, 0.6], // bar 4: sonic logo E–G–A, held
+];
+
+Motion.run({
+  bpm: 128, bars: 5, title: [BRAND.name.toUpperCase(), 'INTRO'], monoFont: F.mono, showHud: false,
+  fonts: [`250px ${F.display}`, `700 30px ${F.mono}`],
+  images,
+  // Default: synthesized bed + jingle melody. F – C – G – Am – Am: lifts then resolves on the logo.
+  music: { intro: 1, outro: true, vol: 0.5, prog: [1, 2, 3, 0, 0], lead },
+  // Licensed track instead (only a track you have the rights to): music: { file: 'assets/music.mp3', start: <s>, vol: 0.9 }
+  //  - the piece BPM must match the track (for a slow track, e.g. 80 BPM, run the piece at double: bpm 160);
+  //  - find the kicks: low-pass the track at ~150 Hz, take the envelope peaks (one big kick per bar);
+  //  - choose start so a kick lands on bar 2 (accent slam) and another on bar 4 (logo): start = kick_time - bar_2_start.
+  scenes: [
+    { bar: 0, bg: C.ink,   motionBlur: 12, draw: slogan,
+      sfx: [[0, 'pop', 0.2], [3, 'thud', 0.3]] },
+    { bar: 1, bg: C.pink,  motionBlur: 10, draw: topics,
+      sfx: [[3.3, 'whoosh', 0.15]] },
+    { bar: 2, bg: C.ink,   motionBlur: 10, draw: wall,
+      sfx: [[3.4, 'whoosh', 0.15]] },
+    { bar: 3, bars: 2, bg: C.paper, motionBlur: 10, draw: lockup,
+      sfx: [[0, 'pop', 0.2], [1, 'ding', 0.2]] },
+  ],
+});
+</script>
+</body>
+</html>

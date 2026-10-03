@@ -1,0 +1,1 @@
+{ "name": "motion-design-render", "private": true, "type": "module", "dependencies": { "playwright": "*" } }

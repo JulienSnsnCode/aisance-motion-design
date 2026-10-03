@@ -1,0 +1,5 @@
+node_modules/
+.DS_Store
+chk*/
+*.mp4
+assets/

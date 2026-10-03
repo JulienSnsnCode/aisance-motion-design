@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Channel Promo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@500;700&display=block" rel="stylesheet">
+<style>
+  html, body { margin: 0; height: 100%; background: #000; }
+  body { display: grid; place-items: center; }
+  canvas { max-width: 100vw; max-height: 100vh; display: block; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<script src="../scripts/engine.js"></script>
+<script src="assets/captures.js"></script>
+<script>
+/* YouTube channel promo. 8 bars @128 BPM = 15 s, 1920x1080, 60 fps. Motif: the dot.
+ * Real content captured with capture.mjs into assets/ (next to this file). Edit BRAND, capture, render.
+ *
+ * 1. Capture the channel page and the video list (replace @yourchannel; English UI):
+ *   S=~/.claude/skills/aisance-motion-design/scripts
+ *   node $S/capture.mjs "https://www.youtube.com/@yourchannel/videos" assets --name channel --locale en-US \
+ *     --el avatar="yt-page-header-renderer yt-avatar-shape img" \
+ *     --el banner="yt-page-header-renderer yt-image-banner-view-model" \
+ *     --el subscribe="yt-page-header-renderer button:has-text('Subscribe')" \
+ *     --box header="yt-page-header-renderer" --box name="yt-page-header-renderer h1" \
+ *     --list thumb="ytd-rich-item-renderer yt-thumbnail-view-model" --max 12 \
+ *     --text subs="yt-content-metadata-view-model" --text name="yt-page-header-renderer h1"
+ *   node $S/capture.mjs "https://www.youtube.com/@yourchannel/videos" assets --name videos --locale en-US --max 12 \
+ *     --attrs href="ytd-rich-item-renderer a.ytLockupViewModelContentImage@href" \
+ *     --texts title="ytd-rich-item-renderer a.ytLockupMetadataViewModelTitle" \
+ *     --texts meta="ytd-rich-item-renderer yt-content-metadata-view-model" \
+ *     --texts dur="ytd-rich-item-renderer .ytBadgeShapeText" \
+ *     --img avatar="yt-page-header-renderer yt-avatar-shape img"
+ *   YouTube changes its DOM often: if a selector finds nothing, inspect the page and update it (see references/captures.md).
+ * 2. Optional, sharper thumbnails (1280x720) from the video ids:
+ *   node --input-type=module -e "import fs from 'node:fs'; const f='assets/captures.json', db=JSON.parse(fs.readFileSync(f)); db.videos.list.hd=[];
+ *     for (const [i,h] of db.videos.text.href.entries()) { const id=new URL(h,'https://www.youtube.com').searchParams.get('v');
+ *       let r=await fetch('https://i.ytimg.com/vi/'+id+'/maxresdefault.jpg'); if(!r.ok) r=await fetch('https://i.ytimg.com/vi/'+id+'/hqdefault.jpg');
+ *       fs.writeFileSync('assets/hd-'+i+'.jpg', Buffer.from(await r.arrayBuffer())); db.videos.list.hd.push('hd-'+i+'.jpg'); }
+ *     fs.writeFileSync(f, JSON.stringify(db,null,2)); fs.writeFileSync('assets/captures.js','window.CAPTURES = '+JSON.stringify(db,null,2)+';\n');"
+ * Numbers (subscribers, videos, views) are READ from the captures, never typed in: only show real figures.
+ */
+const BRAND = {
+  name: 'YOUR NAME',
+  handle: '@yourchannel',
+  tagline: 'TUTORIALS & TOOLS',
+  slogan: [['BUILD', 'FASTER'], ['SHIP', 'BETTER']],   // scene 1: two lines of two words, one word per beat; the last one is accented
+  punch: "THAT'S IT",                                  // scene 2: the dot lands as its full stop
+  topics: [                                            // scene 6: four rings around the avatar (end each with ' • ')
+    'AUTOMATION • AI AGENTS • NO-CODE • ',
+    'WORKFLOWS • TOOLS • TESTS • ',
+    "BUILD FASTER • THAT'S IT • ",
+    'TUTORIALS • REVIEWS • NO HYPE • ',
+  ],
+  labels: { subs: 'SUBSCRIBERS', videos: 'VIDEOS', views: 'VIEWS', top: 'MOST VIEWED', topSub: 'OF THE LATEST VIDEOS',
+            subscribe: 'SUBSCRIBE', subscribed: 'SUBSCRIBED ✓', video: 'VIDEO' },
+  accent: '#FA5F81',
+};
+
+const { ease, spring, range, stagger, lerp, clamp, blob, velocity, text, hash, mixColor, TAU,
+        roundRect, cover, avatar, browser, frameBox, lerpCam, cursor, clickRing } = Motion;
+
+const C = { ink: '#0C0C0E', pink: BRAND.accent, white: '#FFFFFF', paper: '#F2EEE9' };
+const F = { display: '"Bebas Neue", sans-serif', mono: '"JetBrains Mono", monospace' };
+const W = 1920, H = 1080, CX = W / 2, CY = H / 2;
+
+// no captures yet: say so on the canvas and in the console (render.mjs prints the error)
+if (!window.CAPTURES?.channel || !window.CAPTURES?.videos) {
+  const cv = document.querySelector('#stage'); cv.width = W; cv.height = H; const g = cv.getContext('2d');
+  g.fillStyle = C.ink; g.fillRect(0, 0, W, H); g.fillStyle = C.white; g.font = '40px monospace'; g.textAlign = 'center';
+  g.fillText('assets/captures.js missing: run the two capture.mjs commands at the top of this file', CX, CY);
+  throw new Error('assets/captures.js missing (CAPTURES.channel / CAPTURES.videos): run the capture.mjs commands documented at the top of promo-youtube.html');
+}
+const CAP = window.CAPTURES.channel, VID = window.CAPTURES.videos;
+const BOX = CAP.boxes;
+
+// figures parsed from the captured text ("12.3K subscribers", "1,2 k abonnés", "240 videos"…) -> "12.3K"
+const num = (re) => { const line = (CAP.text.subs || '').split('\n').find((l) => re.test(l) && /\d/.test(l)) || ''; const m = line.match(/([\d.,]+)\s*([kKmM])?/); return m ? m[1] + (m[2] || '').toUpperCase() : ''; };
+const SUBS = num(/subscri|abonn/i), VIDEOS = num(/video|vidéo/i);
+// views of each video = first figure of its metadata line, expanded to a number to find the most viewed
+const views = (VID.text.meta || []).map((m) => { const x = String(m).match(/([\d.,]+)\s*([kKmM])?/); if (!x) return { s: '', n: 0 };
+  const n = parseFloat(x[1].replace(',', '.')) * ({ k: 1e3, m: 1e6 }[(x[2] || '').toLowerCase()] || 1); return { s: x[1] + (x[2] || '').toUpperCase(), n }; });
+const THUMBS = VID.list.hd?.length ? VID.list.hd : CAP.list.thumb || [];
+const N = Math.max(1, THUMBS.length);
+const TOP = views.length ? views.reduce((best, v, i) => (v.n > views[best].n ? i : best), 0) : 0;   // most viewed of the latest videos
+
+const images = { page: 'assets/' + CAP.page, avatar: 'assets/' + (VID.el.avatarHD || VID.el.avatar || CAP.el.avatar) };
+THUMBS.forEach((f, i) => (images['t' + i] = 'assets/' + f));
+
+/* ---------- shared ---------- */
+// hexagon texture, drifting slowly
+function hexBg(ctx, lt, alpha = 0.05) {
+  const r = 46, hx = r * Math.sqrt(3), drift = lt * 14;
+  ctx.save(); ctx.strokeStyle = `rgba(255,255,255,${alpha})`; ctx.lineWidth = 2;
+  for (let row = -1; row < H / (r * 1.5) + 1; row++) for (let col = -1; col < W / hx + 1; col++) {
+    const x = col * hx + (row % 2 ? hx / 2 : 0) - (drift % hx), y = row * r * 1.5;
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) { const a = Math.PI / 6 + k * Math.PI / 3; k ? ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r) : ctx.moveTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+    ctx.closePath(); ctx.stroke();
+  }
+  ctx.restore();
+}
+function brackets(ctx, x, y, w, h, color, L = 34, lw = 7) {
+  ctx.strokeStyle = color; ctx.lineWidth = lw;
+  [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]].forEach(([cx, cy, sx, sy]) => {
+    ctx.beginPath(); ctx.moveTo(cx, cy + sy * L); ctx.lineTo(cx, cy); ctx.lineTo(cx + sx * L, cy); ctx.stroke();
+  });
+}
+// selection box with 8 handles + live label: the "designer tool" layer
+function selection(ctx, x, y, w, h, k, label, sub, ink = C.white) {
+  if (k <= 0) return;
+  const pad = 14 + 30 * (1 - k);
+  x -= pad; y -= pad; w += pad * 2; h += pad * 2;
+  ctx.save(); ctx.globalAlpha = clamp(k * 1.5);
+  ctx.strokeStyle = ink; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+  for (const [a, b] of [[0, 0], [0.5, 0], [1, 0], [1, 0.5], [1, 1], [0.5, 1], [0, 1], [0, 0.5]]) {
+    ctx.fillStyle = C.ink; ctx.fillRect(x + a * w - 6, y + b * h - 6, 12, 12); ctx.strokeRect(x + a * w - 6, y + b * h - 6, 12, 12);
+  }
+  text(ctx, label, x, y - 34, { font: `700 17px ${F.mono}`, color: ink, tracking: 2 });
+  if (sub) { ctx.globalAlpha *= 0.6; text(ctx, sub, x, y - 12, { font: `500 15px ${F.mono}`, color: ink, tracking: 2 }); }
+  ctx.restore();
+}
+// odometer: each digit column rolls to its target, right columns spin more
+function odometer(ctx, str, x, y, k, { size, color, align = 'center', tracking = 4 }) {
+  const font = `${size}px ${F.display}`; ctx.font = font;
+  const dw = ctx.measureText('0').width + tracking, lh = size * 0.9;
+  const widths = [...str].map((ch) => (/\d/.test(ch) ? dw : ctx.measureText(ch).width + tracking));
+  const total = widths.reduce((a, b) => a + b, 0);
+  let cx = align === 'center' ? x - total / 2 : x;
+  const digits = [...str].filter((c) => /\d/.test(c)).length;
+  let di = 0;
+  [...str].forEach((ch, i) => {
+    if (/\d/.test(ch)) {
+      const ki = ease.outExpo(clamp((k - di * 0.06) / (1 - (digits - 1) * 0.06)));
+      const spins = 1 + (digits - 1 - di), v = (+ch + 10 * spins) * ki;
+      const base = Math.floor(v), frac = v - base;
+      ctx.save(); ctx.beginPath(); ctx.rect(cx - 4, y - size * 0.74, dw + 8, size * 0.78); ctx.clip();   // tight to the cap height: neighbours stay hidden
+      for (let j = -1; j <= 1; j++) text(ctx, String(((base + j) % 10 + 10) % 10), cx, y + (j - frac) * lh, { font, color });   // next digit rises from below
+      ctx.restore(); di++;
+    } else {
+      ctx.save(); ctx.globalAlpha = clamp(k * 3); text(ctx, ch, cx, y, { font, color }); ctx.restore();
+    }
+    cx += widths[i];
+  });
+}
+
+/* ---------- 1. SLOGAN — one word per beat ---------- */
+function slogan(ctx, p, lt, env) {
+  const b = env.beat, size = 250, font = `${size}px ${F.display}`;
+  hexBg(ctx, lt);
+  ctx.font = font;
+  const sp = ctx.measureText(' ').width;
+  const [l1, l2] = BRAND.slogan;
+  const w = (s) => ctx.measureText(s).width;
+  const x1 = CX - (w(l1[0]) + sp + w(l1[1])) / 2, x2 = CX - (w(l2[0]) + sp + w(l2[1])) / 2;
+  const y1 = CY - 20, y2 = CY + 210;
+  const words = [
+    { s: l1[0], x: x1, y: y1, beat: 0, from: [-1100, 0] },
+    { s: l1[1], x: x1 + w(l1[0]) + sp, y: y1, beat: 1, from: [0, -700] },
+    { s: l2[0], x: x2, y: y2, beat: 2, from: [-1100, 0] },
+    { s: l2[1], x: x2 + w(l2[0]) + sp, y: y2, beat: 3, from: [0, 700], pink: true },
+  ];
+  for (const wd of words) {
+    const e = lt - wd.beat * b;
+    if (e < 0) continue;
+    const k = spring(e, 2.4, 0.42);
+    ctx.save();
+    ctx.translate(wd.x + wd.from[0] * (1 - k), wd.y + wd.from[1] * (1 - k));
+    ctx.rotate((1 - k) * (wd.from[1] ? 0.2 : -0.1));
+    text(ctx, wd.s, 0, 0, { font, color: wd.pink ? C.pink : C.white });
+    ctx.restore();
+    if (wd.pink) {
+      const kb = spring(e - 0.08, 3, 0.5), pad = 22 + 50 * (1 - kb);
+      ctx.save(); ctx.globalAlpha = clamp(kb * 2);
+      brackets(ctx, wd.x - pad, wd.y - size * 0.78 - pad, w(wd.s) + pad * 2, size * 0.8 + pad * 2, C.pink);
+      ctx.restore();
+    }
+  }
+  // the quote marks of the banner, popping on the off-beats
+  const q = spring(lt - b * 0.5, 3, 0.4);
+  if (q > 0) { ctx.save(); ctx.globalAlpha = clamp(q); text(ctx, '“', x1 - 90, y1 - 40, { font: `${220 * q}px ${F.display}`, color: C.pink }); ctx.restore(); }
+}
+
+/* ---------- 2. PUNCHLINE. — mask rise, the dot drops in as the full stop, then becomes the iris ---------- */
+function punchline(ctx, p, lt, env) {
+  const b = env.beat, size = 440, font = `${size}px ${F.display}`, str = BRAND.punch;
+  ctx.font = font;
+  const total = ctx.measureText(str).width, x0 = CX - total / 2 - 50, base = CY + size * 0.36;
+  let x = x0;
+  [...str].forEach((ch, i) => {
+    const w = ctx.measureText(ch).width;
+    const k = ease.outExpo(stagger(lt, 0, b * 0.9, i, str.length, 0.45));
+    ctx.save(); ctx.beginPath(); ctx.rect(x - 10, base - size, w + 20, size * 1.05); ctx.clip();
+    text(ctx, ch, x, base + (1 - k) * size, { font, color: C.ink });
+    ctx.restore(); x += w;
+  });
+  const land = [x + 62, base - 48];
+  const path = (t) => { const q = ease.inCubic(range(t, b * 1.3, b * 2)); return [land[0], lerp(-120, land[1], q)]; };
+  if (lt > b * 1.3) {
+    const [px, py] = path(lt), [vx, vy] = velocity(path, lt);
+    const land_e = lt - b * 2;
+    // squash on impact: wide and flat, then spring back to round
+    const sq = land_e > 0 ? 1 - spring(land_e, 3.2, 0.3) : 0;
+    ctx.save(); ctx.translate(px, py + 48 * sq * 0.5); ctx.scale(1 + sq * 0.6, 1 - sq * 0.45);
+    blob(ctx, 0, 0, 48, land_e > 0 ? 0 : vx, land_e > 0 ? 0 : vy, C.ink, 0.0016);
+    ctx.restore();
+    // impact ticks
+    if (land_e > 0 && land_e < 0.25) {
+      const k = ease.outCubic(land_e / 0.25);
+      ctx.save(); ctx.strokeStyle = C.ink; ctx.lineWidth = 6; ctx.globalAlpha = 1 - k;
+      for (let i = 0; i < 5; i++) { const a = Math.PI + (i / 4) * Math.PI; ctx.beginPath(); ctx.moveTo(land[0] + Math.cos(a) * (70 + 30 * k), land[1] + 48 + Math.sin(a) * (70 + 30 * k)); ctx.lineTo(land[0] + Math.cos(a) * (100 + 50 * k), land[1] + 48 + Math.sin(a) * (100 + 50 * k)); ctx.stroke(); }
+      ctx.restore();
+    }
+    // the dot grows into an iris that becomes the next (ink) scene
+    const iris = ease.inExpo(range(lt, b * 3.2, b * 4));
+    if (iris > 0) { ctx.fillStyle = C.ink; ctx.beginPath(); ctx.arc(land[0], land[1], 48 + iris * 2300, 0, TAU); ctx.fill(); }
+  }
+}
+
+/* ---------- 3. THE REAL CHANNEL PAGE — camera flies to the header, cursor subscribes ---------- */
+function channel(ctx, p, lt, env) {
+  const b = env.beat, img = env.img.page;
+  hexBg(ctx, lt + 4);
+  const ww = 1380, wh = 50 + ww * (img.height / img.width), wx = CX - ww / 2, wy = CY - wh / 2 + 20;
+  const vw = ww, vh = wh - 50;
+  const camFull = { x: img.width / 2, y: img.height / 2, zoom: 1 };
+  const camHead = frameBox(BOX.header, vw, vh, img.width, 1.08);
+  const camSub = frameBox(BOX.subscribe, vw, vh, img.width, 1.0);
+  let cam = lerpCam(camFull, camHead, ease.inOutExpo(range(lt, b * 0.9, b * 1.7)));
+  const punch = ease.inExpo(range(lt, b * 3.55, b * 4));      // exit: dive into the button
+  cam = lerpCam(cam, { ...camSub, zoom: camSub.zoom * 3 }, punch);
+  // window pops out of the iris centre
+  const pop = spring(lt, 2.2, 0.5);
+  ctx.save();
+  ctx.translate(CX, CY); ctx.scale(lerp(0.2, 1, pop), lerp(0.2, 1, pop)); ctx.rotate((1 - pop) * -0.15); ctx.translate(-CX, -CY);
+  const { toScreen, scale } = browser(ctx, img, wx, wy, ww, wh, { url: 'youtube.com/' + BRAND.handle, cam });
+  const sc = (bx) => { const [x, y] = toScreen(bx.x, bx.y); return { x, y, w: bx.w * scale, h: bx.h * scale }; };
+  // tool layer pinned to the real header elements
+  const sel = ease.outExpo(range(lt, b * 1.75, b * 2.3)) * (1 - punch);
+  if (sel > 0) {
+    const n = sc(BOX.name), a = sc(BOX.avatar);
+    selection(ctx, n.x, n.y, n.w, n.h, sel, BRAND.handle.toUpperCase(), [SUBS && `${SUBS} ${BRAND.labels.subs}`, VIDEOS && `${VIDEOS} ${BRAND.labels.videos}`].filter(Boolean).join(' · '), C.pink);
+    ctx.save(); ctx.globalAlpha = sel; ctx.strokeStyle = C.pink; ctx.lineWidth = 3; ctx.setLineDash([10, 8]);
+    ctx.beginPath(); ctx.arc(a.x + a.w / 2, a.y + a.h / 2, a.w / 2 + 14 + 20 * (1 - sel), -lt * 2, -lt * 2 + TAU); ctx.stroke(); ctx.restore();
+  }
+  // subscribe: the button turns pink on the click (beat 4)
+  const s = sc(BOX.subscribe), click = b * 3.15, ce = lt - click;
+  if (ce > 0) {
+    const k = spring(ce, 3, 0.4);
+    ctx.save(); ctx.translate(s.x + s.w / 2, s.y + s.h / 2); ctx.scale(lerp(0.85, 1, k), lerp(0.85, 1, k));
+    roundRect(ctx, -s.w / 2, -s.h / 2, s.w, s.h, s.h / 2); ctx.fillStyle = C.pink; ctx.fill();
+    text(ctx, BRAND.labels.subscribed, 0, s.h * 0.17, { font: `600 ${Math.round(s.h * 0.42)}px ui-sans-serif, system-ui, sans-serif`, color: C.white, align: 'center' });
+    ctx.restore();
+  }
+  ctx.restore();
+  // cursor: glides in, clicks, rides the camera dive
+  const target = [s.x + s.w * 0.62, s.y + s.h * 0.62];
+  const mv = ease.inOutCubic(range(lt, b * 2.2, b * 3.05));
+  const path = (t) => { const q = ease.inOutCubic(range(t, b * 2.2, b * 3.05)); return [lerp(W + 80, target[0], q) - Math.sin(q * Math.PI) * 120, lerp(H - 120, target[1], q) + Math.sin(q * Math.PI) * 80]; };
+  if (mv > 0 && punch < 0.6) {
+    const [cx, cy] = mv < 1 ? path(lt) : target;
+    const press = ce > 0 && ce < 0.18 ? Math.sin((ce / 0.18) * Math.PI) : 0;
+    clickRing(ctx, target[0], target[1], ce, C.pink, 90);
+    cursor(ctx, cx, cy, { press, scale: 2 });
+  }
+}
+
+/* ---------- 4. STATS — rolling counters ---------- */
+function stats(ctx, p, lt, env) {
+  const b = env.beat;
+  const out = ease.inExpo(range(lt, b * 3.5, b * 4));
+  const lift = ease.inOutExpo(range(lt, b * 1.8, b * 2.3));
+  ctx.save(); ctx.translate(0, out * 1200);
+  const y1 = lerp(CY + 150, CY + 20, lift);
+  odometer(ctx, SUBS, CX, y1, range(lt, 0, b * 1.4), { size: 400, color: C.ink, tracking: 6 });
+  const l1 = ease.outExpo(range(lt, b * 0.9, b * 1.5));
+  text(ctx, BRAND.labels.subs, CX, y1 + 105, { font: `700 34px ${F.mono}`, color: C.ink, align: 'center', tracking: lerp(2, 22, l1) });
+  if (lt > b * 2) {
+    const y2 = CY + 330, k = range(lt, b * 2, b * 3);
+    ctx.save(); ctx.globalAlpha = clamp(k * 4);
+    ctx.font = `170px ${F.display}`; const nw = VIDEOS.length * (ctx.measureText('0').width + 4);
+    ctx.font = `700 34px ${F.mono}`; const lw = ctx.measureText(BRAND.labels.videos).width + 60;
+    const gx = CX - (nw + 24 + lw) / 2;                       // centre the number + label as one group
+    odometer(ctx, VIDEOS, gx, y2, k, { size: 170, color: C.white, tracking: 4, align: 'left' });
+    text(ctx, BRAND.labels.videos, gx + nw + 24, y2 - 40, { font: `700 34px ${F.mono}`, color: C.white, tracking: 10 });
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/* ---------- 5. THUMBNAIL WALL — rows step one card per beat ---------- */
+function wall(ctx, p, lt, env) {
+  const b = env.beat, tw = 520, th = 292, gap = 28;
+  hexBg(ctx, lt + 8, 0.035);
+  ctx.save();
+  ctx.translate(CX, CY); ctx.rotate(-0.12); ctx.scale(1.08, 1.08); ctx.translate(-CX, -CY);
+  for (let r = 0; r < 4; r++) {
+    const dir = r % 2 ? 1 : -1;
+    const enter = ease.outExpo(stagger(lt, 0, b * 1.1, r, 4, 0.6));
+    // step on every beat from beat 2: a fast inOutExpo move of one card, then hold
+    let steps = 0;
+    for (let s = 1; s < 4; s++) steps += ease.inOutExpo(range(lt, s * b - b * 0.32, s * b));
+    const shift = dir * (steps * (tw + gap) + (1 - enter) * 2200);
+    const y = CY - 2 * (th + gap) + r * (th + gap) + gap / 2 - 30;
+    for (let i = -3; i < 8; i++) {
+      const idx = ((i + r * 3) % N + N) % N;
+      const x = i * (tw + gap) + shift - (r % 2 ? 300 : 0);
+      if (x < -tw - 200 || x > W + 400) continue;
+      cover(ctx, env.img['t' + idx], x, y, tw, th, { radius: 16 });
+    }
+  }
+  ctx.restore();
+  // pink scan line sweeps on beat 4 and pushes into the next scene
+  const sweep = ease.inExpo(range(lt, b * 3.4, b * 4));
+  if (sweep > 0) { ctx.fillStyle = C.paper; ctx.fillRect(0, 0, W * sweep, H); ctx.fillStyle = C.pink; ctx.fillRect(W * sweep - 24, 0, 24, H); }
+}
+
+/* ---------- 6. TOPICS → RINGS around the avatar ---------- */
+const rowsTxt = [
+  { s: BRAND.topics[0], size: 60, stroke: 0, track: 8, dir: -1, ring: 410 },
+  { s: BRAND.topics[1], size: 46, stroke: 1.6, track: 5, dir: 1, ring: 335 },
+  { s: BRAND.topics[2], size: 42, stroke: 0, track: 5, dir: -1, ring: 265 },
+  { s: BRAND.topics[3], size: 34, stroke: 1.4, track: 4, dir: 1, ring: 200 },
+];
+function rings(ctx, p, lt, env) {
+  const b = env.beat;
+  const k = ease.inOutExpo(range(lt, b * 0.9, b * 2.2));
+  const enter = (i) => ease.outExpo(stagger(lt, 0, b * 0.7, i, 4, 0.6));
+  rowsTxt.forEach((row, i) => {
+    ctx.font = `${row.size}px ${F.display}`;
+    const straightY = CY - 170 + i * 105;
+    const R = row.ring * Math.pow(6000 / row.ring, 1 - k);
+    const top = lerp(straightY, CY - row.ring, k), cy = top + R;
+    const scroll = row.dir * (lt * 240 + (1 - enter(i)) * 1800);
+    const spin = row.dir * k * lt * 0.3;
+    let a = -Math.PI / 2 - (W * 0.75) / R + scroll / R + spin, n = 0;
+    const end = a + Math.min(TAU, (W * 1.6) / R);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    while (a < end && n < 600) {
+      const ch = row.s[n % row.s.length], w = ctx.measureText(ch).width + row.track, da = w / R;
+      ctx.save();
+      ctx.translate(CX + Math.cos(a + da / 2) * R, cy + Math.sin(a + da / 2) * R);
+      ctx.rotate(a + da / 2 + Math.PI / 2);
+      const accent = ch === '•';
+      if (row.stroke && !accent) { ctx.lineWidth = row.stroke; ctx.strokeStyle = C.ink; ctx.strokeText(ch, 0, 0); }
+      else { ctx.fillStyle = accent ? C.pink : C.ink; ctx.fillText(ch, 0, 0); }
+      ctx.restore();
+      a += da; n++;
+    }
+  });
+  // the avatar takes the place of the motif dot in the centre
+  const av = spring(lt - b * 2.1, 2.4, 0.45);
+  if (av > 0) avatar(ctx, env.img.avatar, CX, CY, 140 * av, { ring: 8 * av, ringColor: C.pink });
+  // exit: everything spins away and collapses into the avatar
+}
+
+/* ---------- 7. MOST VIEWED — the card slams in, tool layer, play ---------- */
+function featured(ctx, p, lt, env) {
+  const b = env.beat, cw = 980, chh = 551, cx0 = 150, cy0 = CY - chh / 2 + 30;
+  const k = spring(lt, 2.2, 0.45);
+  const out = ease.inExpo(range(lt, b * 3.45, b * 4));
+  ctx.save();
+  const ccx = cx0 + cw / 2, ccy = cy0 + chh / 2;
+  ctx.translate(ccx + (1 - k) * -900 + out * (CX - ccx), ccy + out * (CY - ccy));
+  ctx.rotate((1 - k) * -0.3); const sc = 1 + out * 1.6; ctx.scale(sc, sc);
+  ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 50; ctx.shadowOffsetY = 20;
+  roundRect(ctx, -cw / 2, -chh / 2, cw, chh, 22); ctx.fillStyle = C.ink; ctx.fill(); ctx.shadowColor = 'transparent';
+  cover(ctx, env.img['t' + TOP], -cw / 2, -chh / 2, cw, chh, { radius: 22 });
+  // duration badge
+  roundRect(ctx, cw / 2 - 118, chh / 2 - 62, 98, 42, 8); ctx.fillStyle = 'rgba(0,0,0,0.8)'; ctx.fill();
+  text(ctx, (VID.text.dur || [])[TOP] || '', cw / 2 - 69, chh / 2 - 32, { font: `700 22px ${F.mono}`, color: C.white, align: 'center' });
+  // play button pops on beat 3, pulses on beat 4
+  const pb = spring(lt - b * 2, 2.6, 0.38), pulse = lt - b * 3;
+  if (pb > 0) {
+    const s = pb * (1 + (pulse > 0 && pulse < 0.3 ? Math.sin((pulse / 0.3) * Math.PI) * 0.12 : 0));
+    ctx.save(); ctx.scale(s, s);
+    roundRect(ctx, -70, -48, 140, 96, 26); ctx.fillStyle = C.pink; ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-18, -26); ctx.lineTo(30, 0); ctx.lineTo(-18, 26); ctx.closePath(); ctx.fillStyle = C.white; ctx.fill();
+    ctx.restore();
+    clickRing(ctx, 0, 0, pulse, C.white, 160);
+  }
+  ctx.restore();
+  // tool layer + copy on the right (hidden on exit)
+  const tl = ease.outExpo(range(lt, b * 0.7, b * 1.2)) * (1 - out * 3);
+  selection(ctx, cx0, cy0, cw, chh, tl, `${BRAND.labels.video} ${String(TOP + 1).padStart(2, '0')} · ${(VID.text.dur || [])[TOP] || ''}`, `${BRAND.labels.top} ${BRAND.labels.topSub}`, C.ink);
+  if (out < 0.3) {
+    const tx = cx0 + cw + 90;
+    ctx.save(); ctx.globalAlpha = 1 - out * 3;
+    const l = ease.outExpo(range(lt, b * 1, b * 1.5));
+    text(ctx, BRAND.labels.top, tx, CY - 150, { font: `700 26px ${F.mono}`, color: C.ink, tracking: lerp(2, 12, l) });
+    if (lt > b * 1.2) odometer(ctx, (views[TOP] || {}).s || '', tx, CY + 60, range(lt, b * 1.2, b * 2.4), { size: 260, color: C.white, align: 'left' });
+    const vl = ease.outExpo(range(lt, b * 1.8, b * 2.3));
+    ctx.save(); ctx.beginPath(); ctx.rect(tx, CY + 80, 700, 60); ctx.clip();
+    text(ctx, BRAND.labels.views, tx + 6, CY + 128 + (1 - vl) * 60, { font: `64px ${F.display}`, color: C.ink, tracking: 6 });
+    ctx.restore();
+    ctx.restore();
+  }
+}
+
+/* ---------- 8. END CARD — avatar, name, subscribe ---------- */
+function endCard(ctx, p, lt, env) {
+  const b = env.beat;
+  hexBg(ctx, lt + 12, 0.04);
+  const av = spring(lt, 2.4, 0.45);
+  avatar(ctx, env.img.avatar, CX, CY - 170, 150 * av, { ring: 8 * av, ringColor: C.pink });
+  const name = BRAND.name.toUpperCase(), font = `150px ${F.display}`;
+  ctx.font = font;
+  const tracking = 6, total = [...name].reduce((s, ch) => s + ctx.measureText(ch).width + tracking, 0);
+  let x = CX - total / 2; const base = CY + 100;
+  [...name].forEach((ch, i) => {
+    const w = ctx.measureText(ch).width + tracking;
+    const k = ease.outExpo(stagger(lt, b * 0.3, b * 1.4, i, name.length, 0.45));
+    ctx.save(); ctx.beginPath(); ctx.rect(x - 6, base - 140, w + 12, 160); ctx.clip();
+    text(ctx, ch, x, base + (1 - k) * 160, { font, color: C.white });
+    ctx.restore(); x += w;
+  });
+  // handle types on, anchored left (no ghosting under motion blur)
+  const handle = `${BRAND.handle}  ·  ${BRAND.tagline}`;
+  ctx.font = `500 26px ${F.mono}`;
+  const hx = CX - (ctx.measureText(handle).width + 2 * handle.length) / 2;
+  const chars = Math.floor(handle.length * range(lt, b * 1.1, b * 2));
+  ctx.save(); ctx.globalAlpha = 0.7; text(ctx, handle.slice(0, chars), hx, base + 62, { font: `500 26px ${F.mono}`, color: C.white, tracking: 2 }); ctx.restore();
+  // subscribe button pops on beat 3, cursor clicks just after, final pose from beat 3.3
+  const bw = 330, bh = 84, by = base + 120, bx = CX - bw / 2;
+  const pop = spring(lt - b * 1.9, 2.6, 0.4), click = b * 2.75, ce = lt - click;
+  if (pop > 0) {
+    const pressed = ce > 0, press = ce > 0 && ce < 0.18 ? Math.sin((ce / 0.18) * Math.PI) : 0;
+    ctx.save(); ctx.translate(CX, by + bh / 2); const s = pop * (1 - press * 0.08); ctx.scale(s, s);
+    roundRect(ctx, -bw / 2, -bh / 2, bw, bh, bh / 2); ctx.fillStyle = pressed ? C.white : C.pink; ctx.fill();
+    text(ctx, pressed ? BRAND.labels.subscribed : BRAND.labels.subscribe, 0, 17, { font: `54px ${F.display}`, color: pressed ? C.ink : C.white, align: 'center', tracking: 4 });
+    ctx.restore();
+    const target = [CX + 70, by + bh * 0.6];
+    const path = (t) => { const q = ease.inOutCubic(range(t, b * 2.05, b * 2.7)); return [lerp(W - 200, target[0], q), lerp(H + 60, target[1], q) - Math.sin(q * Math.PI) * 60]; };
+    if (lt > b * 2.05) {
+      clickRing(ctx, target[0], target[1], ce, C.pink, 110);
+      cursor(ctx, ...(lt < b * 2.7 ? path(lt) : target), { press, scale: 2 });
+    }
+  }
+}
+
+// n evenly spaced cues between two beats (odometer ticks, typing)
+const roll = (from, to, n, name, vol) => Array.from({ length: n }, (_, i) => [from + (to - from) * (i / Math.max(1, n - 1)), name, vol]);
+
+Motion.run({
+  bpm: 128, bars: 8, title: [BRAND.name.toUpperCase(), 'YOUTUBE · ' + BRAND.tagline], monoFont: F.mono,
+  fonts: [`250px ${F.display}`, `500 15px ${F.mono}`, `700 15px ${F.mono}`],
+  images,
+  // synthesized bed at 128 BPM: bar 1 = intro (no kick), bar 6 = break (breath before the payoff), last bar = final hit + pad tail
+  music: { intro: 1, breaks: [5], outro: true, vol: 0.42 },
+  // sfx beats mirror the animation timings of each scene (same numbers as in its draw function)
+  // sparse sfx: one per readable action, the music carries the rhythm
+  scenes: [
+    { bar: 0, bg: C.ink,   hudInk: C.white, draw: slogan,
+      sfx: [[0, 'swish', 0.3], [3, 'impact', 0.35]] },
+    { bar: 1, bg: C.pink,  hudInk: C.ink,   motionBlur: 14, draw: punchline,
+      sfx: [[2, 'thud', 0.5], [4, 'riser', 0.25, { align: 'end' }]] },
+    { bar: 2, bg: C.ink,   hudInk: C.white, motionBlur: 10, draw: channel,
+      sfx: [[0, 'pop', 0.25], [3.15, 'click', 0.5]] },
+    { bar: 3, bg: C.pink,  hudInk: C.ink,   draw: stats,
+      sfx: [...roll(0, 1.3, 6, 'key', 0.15), [1.4, 'tick', 0.3]] },
+    { bar: 4, bg: C.ink,   hudInk: C.white, motionBlur: 10, draw: wall,
+      sfx: [[0, 'whoosh', 0.3]] },
+    { bar: 5, bg: C.paper, hudInk: C.ink,   draw: rings,
+      sfx: [[2.1, 'pop', 0.3]] },
+    { bar: 6, bg: C.pink,  hudInk: C.ink,   motionBlur: 10, draw: featured,
+      sfx: [[0, 'swish', 0.3], [2, 'pop', 0.3]] },
+    { bar: 7, bg: C.ink,   hudInk: C.white, hud: 'corners', draw: endCard,
+      sfx: [[0, 'pop', 0.25], [2.75, 'click', 0.5], [2.75, 'ding', 0.25]] },
+  ],
+});
+</script>
+</body>
+</html>
